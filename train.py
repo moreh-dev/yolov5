@@ -27,7 +27,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import yaml
-from torch.cuda import amp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import SGD, Adam, AdamW, lr_scheduler
 from tqdm import tqdm
@@ -274,7 +273,6 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     maps = np.zeros(nc)  # mAP per class
     results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
     scheduler.last_epoch = start_epoch - 1  # do not move
-    scaler = amp.GradScaler(enabled=cuda)
     stopper = EarlyStopping(patience=opt.patience)
     compute_loss = ComputeLoss(model)  # init loss class
     LOGGER.info(f'Image sizes {imgsz} train, {imgsz} val\n'
@@ -324,23 +322,13 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 if sf != 1:
                     ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
                     imgs = nn.functional.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
+            
+            pred = model(imgs)  # forward
+            loss, loss_items = compute_loss(pred, targets.to(device))
+            loss.backward()
 
-            # Forward
-            with amp.autocast(enabled=cuda):
-                pred = model(imgs)  # forward
-                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
-                if RANK != -1:
-                    loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
-                if opt.quad:
-                    loss *= 4.
-
-            # Backward
-            scaler.scale(loss).backward()
-
-            # Optimize
             if ni - last_opt_step >= accumulate:
-                scaler.step(optimizer)  # optimizer.step
-                scaler.update()
+                optimizer.step()
                 optimizer.zero_grad()
                 if ema:
                     ema.update(model)
@@ -352,9 +340,6 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
                 pbar.set_description(('%10s' * 2 + '%10.4g' * 5) % (
                     f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1]))
-                callbacks.run('on_train_batch_end', ni, model, imgs, targets, paths, plots, opt.sync_bn)
-                if callbacks.stop_training:
-                    return
             # end batch ------------------------------------------------------------------------------------------------
 
         # Scheduler
