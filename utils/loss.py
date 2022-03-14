@@ -191,7 +191,13 @@ class ComputeLoss:
                 r = t[:, :, 4:6] / anchors[:, None]  # wh ratio
                 j = torch.max(r, 1 / r).max(2)[0] < self.hyp['anchor_t']  # compare
                 # j = wh_iou(anchors, t[:, 4:6]) > model.hyp['iou_t']  # iou(3,n)=wh_iou(anchors(3,2), gwh(n,2))
-                t = t[j]  # filter
+                if len(t.shape) == 3:
+                    t = t.reshape(t.shape[0] * t.shape[1], t.shape[-1])
+                if len(j.shape) == 2:
+                    j = j.reshape(j.shape[0] * j.shape[1])
+
+                j = j.repeat(t.shape[-1],1).T
+                t = t[j].reshape(-1, t.shape[-1])  # filter
 
                 # Offsets
                 gxy = t[:, 2:4]  # grid xy
